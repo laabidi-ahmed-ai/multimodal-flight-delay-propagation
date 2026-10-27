@@ -1,0 +1,43 @@
+# Project configuration. Every script reads paths and parameters from here.
+# Never hard-code dates, airports or paths in code.
+
+# Data lives OUTSIDE the repo and outside OneDrive (CLAUDE.md §6).
+data_dir: C:/data/flight-delay
+
+# Origin airports in scope (flights departing from these hubs), IATA codes.
+hubs: [ATL, ORD, DFW, DEN, LAX, JFK, CLT, LAS, PHX, SEA]
+
+# Full download period. Develop on 2025 first, then add 2024 (CLAUDE.md §6).
+period:
+  start: 2024-01-01
+  end: 2026-12-31          # scripts skip BTS months not yet published
+
+# Time-based split, never random (Golden rule 3).
+split:
+  train: [2024-01-01, 2025-12-31]
+  validation: [2026-01-01, 2026-02-28]
+  test: [2026-03-01, 2026-12-31]   # touched once, for the final numbers
+
+# Prediction moment: T_pred = scheduled departure (UTC) - this many hours.
+t_pred_offset_hours: 2
+
+# Broken-chain rule (CLAUDE.md §5): max plausible ground time between legs.
+max_ground_time_hours: 12
+
+# IEM download etiquette: <= 1 request/second, station by station.
+iem:
+  min_seconds_between_requests: 1.0
+
+radar:
+  product: n0q              # high quality; n0r is the lighter fallback
+  frames_per_hour: 1
+  history_hours: 2          # crops at T_pred and the 2 hours before
+  # Native pixels. Decide ONCE before the full run: you can shrink later,
+  # never enlarge without re-downloading. 256 px ~ +/-60 km around the airport.
+  crop_size_px: 256
+  keep_national_months: 1   # national images kept for debugging; others deleted after cropping
+
+# Cost-style metric (CLAUDE.md §12). STATED ASSUMPTIONS, not real airline
+# figures: cite a source or run a sensitivity analysis before reporting.
+cost_missed_delay: 1.0
+cost_false_alarm: 0.2

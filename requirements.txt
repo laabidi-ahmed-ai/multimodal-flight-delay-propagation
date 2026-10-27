@@ -1,0 +1,49 @@
+# Grouped by purpose. Versions are not pinned yet: once the pipeline works,
+# freeze the exact versions (pip freeze) so results are reproducible.
+
+# Config, downloads, utilities
+pyyaml
+requests
+tqdm
+python-dotenv
+
+# Data processing and storage
+pandas<3.1         # 3.1.0's compiled files are blocked by Windows Smart App Control on the author's PC
+numpy
+polars
+duckdb
+pyarrow
+pandera
+
+# Time zones, airports, holidays, weather parsing
+airportsdata
+holidays
+metar              # the python-metar library
+
+# Radar images
+pillow
+matplotlib
+
+# Classic ML and explainability
+scikit-learn
+xgboost
+shap
+
+# Deep learning (CPU build locally; GPU training happens on Kaggle)
+torch
+torchvision
+sentence-transformers
+
+# Experiment tracking
+mlflow
+
+# API and demo
+fastapi
+uvicorn
+streamlit
+pydeck
+
+# Notebooks, tests, code quality
+ipykernel
+pytest
+ruff

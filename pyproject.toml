@@ -1,0 +1,22 @@
+[project]
+name = "multimodal-flight-delay-propagation"
+version = "0.1.0"
+description = "Multimodal prediction of flight delays and their propagation along aircraft rotations"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-include = ["*.ipynb"]   # lint notebooks too
+
+[tool.ruff.lint]
+# E/W: style errors and warnings (pycodestyle)  F: real bugs (pyflakes: unused imports, undefined names)
+# I: import sorting  B: likely bugs (bugbear)  UP: modern Python syntax  SIM: simpler code
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.ipynb" = ["E402"]   # imports in later cells are normal in notebooks
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
