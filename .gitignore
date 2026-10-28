@@ -223,5 +223,8 @@ data/
 *.parquet
 *.zip
 
+# MLflow local runs (experiments are re-runnable; screenshots go in docs/)
+mlruns/
+
 # Secrets
 .env

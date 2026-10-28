@@ -154,11 +154,19 @@ All free. Verify each link works from your network in Phase 1 (setup).
 - IEM rate limits: about **1 request/second per IP**; a request **without specific stations is capped at 24 hours** of data; since January 2026 a single request is capped at **1,000 station-years**. Always query **station by station**.
 - Radar `n0q` files are ~2–5 MB each; `n0r` ~0.3 MB. **Free disk: ~120 GB.** `n0q` hourly for Jan 2024 → Oct 2026 (~25,000 images) would take ~45–115 GB as national images, too close to the limit. **Policy: keep `n0q` (high quality) but crop-and-delete:** download a month → cut crops for the needed airports/hours → delete that month's national images (keep **one** month of national images for debugging). Crops keep full native resolution, so quality is unchanged. **Test one day first** (download speed, crop, colour → dBZ).
 - Crop size: decide once before the full run (e.g. 256×256 native pixels ≈ ±60 km around the airport). You can shrink crops later, never enlarge them without re-downloading.
-- Only crop what flights need: the 10 hubs at every hour, and destination airports at the hours used by flights (`T_pred` and the 2 hours before). Store crops compactly (e.g. one compressed `.npz` per airport per month), not millions of small PNG files.
+- Only crop what flights need: the 10 hubs at every hour, and destination airports at the hours used by flights (`T_pred` and the 2 hours before). Crops are cut **in memory while downloading**: national images are never saved (except `keep_national_days` in `config.yaml`), and crops are stored as **one compressed `.npz` per day**, not millions of small PNG files. The US composite covers the **contiguous US only**: Alaska/Hawaii/Puerto Rico destinations have no radar crop (listed in `skipped_airports.txt`; the model must handle a missing image).
 - Not available for free (do not plan on them): historical FAA ground stops / ground delay programs (public page keeps only ~14 days; full history in FAA ASPM, which requires an FAA account), NOTAM history (no clean free bulk archive), and any open flight-by-flight delay dataset for Tunisia or Europe comparable to BTS.
 - Data is US-only. Say so explicitly; the method is general.
 
 ---
+
+### Where the work happens (DuckDB + Databricks)
+- **Raw downloads and the master copy of every table live on the PC** (`data_dir`, Parquet). Nothing is ever only in one tool.
+- **Develop and debug the joins in DuckDB on the PC** (fast, no quota): write each transformation as a SQL file, test it on one month.
+- **Run the real pipeline on Databricks:** upload the Bronze/Silver Parquet files, run the same SQL in Spark SQL, build the **Bronze → Silver → Gold Delta tables** there, and track experiments in **MLflow**. This is genuine project work (notebooks, Delta tables, job runs, MLflow screenshots), not a demo copy.
+- **Export the Gold table back to the PC** as Parquet: it feeds Kaggle training and the demo.
+- **If the Databricks daily quota stops you,** rerun the same SQL in DuckDB from the PC files and continue; nothing is lost.
+- Keep SQL portable: where engines differ (e.g. `ASOF JOIN` in DuckDB vs. `ROW_NUMBER` in Spark), keep both variants side by side and check they give the same row counts.
 
 ### How to download (scripts in `src/ingest/`)
 Run from the repo root, inside the virtual environment. All scripts read `config.yaml`, write to `<data_dir>/raw/`, skip files already downloaded (resumable) and print what is missing.
@@ -169,12 +177,15 @@ Run from the repo root, inside the virtual environment. All scripts read `config
 | 2 | `python -m src.ingest.build_station_list` | `raw/stations.csv` (hubs + all destinations: IATA, ICAO, lat, lon, tz) |
 | 3 | `python -m src.ingest.download_metar --hubs-only` (test) then without the flag | `raw/metar/<IATA>.csv` |
 | 4 | `python -m src.ingest.download_taf --hubs-only` (test) then without the flag | `raw/taf/<ICAO>.csv` |
-| 5 | `python -m src.ingest.download_radar --test-day 2025-07-15` (test) then without the flag, overnight | `raw/radar/<product>/YYYY/MM/DD/<product>_YYYYMMDDHH00.png` + `.wld` |
+| 5 | `python -m src.ingest.download_radar --test-day 2025-07-15` (test: hubs only, national images kept to inspect) | `raw/radar_national/2025/07/15/` + `raw/radar_crops/2025/07/20250715.npz` |
+| 6 | `python -m src.ingest.radar_needed_hours` | `raw/radar_needed_hours.parquet` (hubs every hour + destinations at the hours flights need) |
+| 7 | `python -m src.ingest.download_radar` (full, overnight, resumable) | `raw/radar_crops/YYYY/MM/YYYYMMDD.npz` — keys `<IATA>_<YYYYMMDDHH>`, 256×256 uint8 raw palette values |
 
 Notes:
 - IEM uses 3-letter FAA ids for METAR (`ATL`) and 4-letter ICAO ids for TAF (`KATL`). Alaska/Hawaii ICAO codes start with `P` (e.g. `PANC`, `PHNL`), so ICAO codes come from `airportsdata`, never by prefixing `K`.
 - BTS ZIPs may contain a readme next to the CSV: open the `.csv` member explicitly.
 - TAF service parameters (from the IEM form's curl example): `year1, month1, day1, hour1, minute1, year2, …, tz=UTC, fmt=comma`; the script tries `KATL` then `ATL`. Some small airports issue no TAF: that is normal.
+- Radar missing images: `http_get` returns `None` only on a 404 (the image does not exist on the server, so retrying is useless); it is listed in `missing_files.txt` and the day is saved without it. Network/server errors raise after the retries instead: the run stops before that day's `.npz` is written, so the day is redone from scratch on restart.
 
 **Verified during setup (browser tests from Tunisia):** BTS ZIP ✅ (CSV ~26 MB compressed + `readme.html`), METAR ✅, TAF form ✅, radar PNG ✅.
 
@@ -214,13 +225,20 @@ Each source is like a separate notebook. To join two, you need a label present i
 
 **Rotation across midnight:** build chains per `Tail_Number` over **continuous UTC time** (not limited to one `FlightDate`), so late-evening flights and red-eyes stay linked to the next morning's leg when the ground time is short. Long ground times (overnight parking, maintenance, days off schedule) end the chain via the rule below. Useful features: `ground_time_before` (planned buffer), `hours_since_previous_arrival`, `is_first_leg_of_chain`.
 
-**Broken-chain rule:** sort each tail number's legs by UTC departure. A link between two consecutive legs is valid only if (1) `next.Origin == previous.Dest`, (2) next departure is after previous arrival, and (3) the ground time is **below the threshold chosen from the data** (see "Aircraft ground time" below; not a fixed 12 h). Otherwise the chain is **broken** there (international leg missing from BTS, aircraft swap, data error, missing/blank tail number) → start a new chain segment, set `has_previous_leg = False` (previous-leg features empty), and exclude that pair from the next-leg (propagation) target. Log and report the share of broken links (expected small). Test: `test_broken_chain_detection`.
+**Broken-chain rule:** sort each tail number's legs by UTC departure. A link between two consecutive legs is valid only if (1) `next.Origin == previous.Dest`, (2) next departure is after previous arrival, and (3) the ground time is **below the threshold chosen from the data** (see "Aircraft ground time" below; not a fixed 12 h). Otherwise the chain is **broken** there (international leg missing from BTS, aircraft swap, data error, missing/blank tail number) → start a new chain segment, set `has_previous_leg = False` (previous-leg features empty), and exclude that pair from the next-leg (propagation) target. Log and report the share of broken links (expected small). Tests: `test_broken_chain_detection` (airport mismatch, long ground time, cancelled, diverted, overlapping legs, swap by actual timing).
 
 **Aircraft ground time (overnight, maintenance, swaps):**
 - Aircraft have no "rest days", but they park **overnight** (several hours) and leave service for **maintenance** (light checks often overnight; heavy checks for days or weeks). Airlines also **swap aircraft** when one is late or broken.
 - Consequence: a delay mostly propagates **within the same operating day**; a long overnight stop usually absorbs it.
 - **Choose the "new chain" threshold from the data** (Phase 1, step 1.2): plot the distribution of ground times between consecutive legs of the same tail. Expect two groups: short turnarounds (under ~2 h) and overnight stops (many hours). Put the break threshold between them instead of a fixed 12 h, and document the choice.
 - Chain on tail number + ground-time gap (not only `FlightDate`), so late-evening flights that cross midnight are handled correctly.
+- **Extra checks that use the flight/delay columns themselves:**
+  - **Linking uses scheduled times** (`CRSDepTime`, `CRSArrTime`), which are known in advance, so building the chain itself causes no leakage.
+  - **Cancelled leg** (`Cancelled = 1`): the plane did not fly it, so the next leg cannot inherit from it → break the chain at that leg (and never use a cancelled leg as a label).
+  - **Diverted leg** (`Diverted = 1`): the plane ended at another airport → break the chain after it.
+  - **Impossible actual timing** (historical cleaning only): if the next leg's actual departure is before the previous leg's actual arrival plus a minimum turnaround, the airline must have **swapped the aircraft** → break. This uses actual times, so it is used only to clean training/evaluation pairs, never as a model input; mention it in the report.
+  - **Implausibly short scheduled turnaround** (e.g. under ~20 min) or **two legs of the same tail overlapping in time** → data error → break.
+  - **Consistency check (analysis only, never an input):** on valid links, a next leg with `LateAircraftDelay > 0` should usually follow a late previous arrival. Report the share of links that agree; a low share means the chain logic needs fixing.
 - Useful features: scheduled ground time (buffer), leg number of the day, first-flight-of-the-day flag, hours since the aircraft's first departure today.
 - An aircraft missing for days (maintenance) simply starts a new chain when it returns.
 - Note: a missing international round trip (ATL→JFK, [JFK→CDG→JFK missing], JFK→MIA) passes conditions 1 and 2 (same airport, later time); it is caught by **condition 3** because the hidden trip makes the ground time very long. Limitation: a very short missing hop (e.g. a quick cross-border round trip under the threshold) could slip through; this is rare and is mentioned in the report's limitations.
@@ -235,7 +253,7 @@ Each source is like a separate notebook. To join two, you need a label present i
 | Training | **2024 + 2025** (two full seasonal cycles). See "Why 2024 + 2025" below |
 | Validation | First published months of 2026 (e.g. Jan–Feb) |
 | Test | Remaining published months of 2026 (check BTS availability) |
-| Radar | `n0q` (or `n0r`), 1 image/hour, 128×128 crop per airport (optionally last 3 hours = 3 frames). Keep the national images too (space allows). |
+| Radar | `n0q`, 1 image/hour, **256×256 crop** (`radar.crop_px` in `config.yaml`, ~140 km wide) per airport, last 3 hourly frames. National images are **not** kept (crop in memory; one debug day kept). Models may downsample crops (e.g. to 128×128) at training time. |
 | Data location | **Outside the repo and outside OneDrive**, e.g. `C:\data\flight-delay\`, read from `config.yaml` (`data_dir`) |
 | Raw files | BTS, METAR, TAF **kept**. Radar national images **deleted after cropping** (one month kept for debugging) |
 | Expected total size | ~15–25 GB with crop-and-delete (120 GB free); never keep all national `n0q` images |
@@ -478,7 +496,7 @@ Do not move on until you can answer the check questions without notes.
 **Tasks**
 - [ ] Open one PNG and its `.wld` file
 - [ ] Convert ATL lat/lon to pixel coordinates using the `.wld` values
-- [ ] Crop 128×128 around ATL
+- [ ] Crop 256×256 around ATL (already done by `download_radar --test-day`; inspect it)
 - [ ] Map colours/pixel values to storm intensity (dBZ)
 - [ ] Display a crop during a known storm next to the matching METAR
 
@@ -603,7 +621,7 @@ Do not move on until you can answer the check questions without notes.
 - [ ] Compare: raw coded text vs. decoded sentences vs. parsed numbers
 
 #### Step 3.3: Image encoder
-- [ ] Pretrained ResNet18 on 128×128 crops (frozen first, then fine-tune last block)
+- [ ] Pretrained ResNet18 on the crops (256×256, or downsampled to 128×128 if training is slow; frozen first, then fine-tune last block)
 - [ ] Two crops per flight (origin + destination) through a **shared** CNN → two embeddings
 - [ ] **Image-encoder comparison** (image-only model, same crops, same split, same epochs, selected on **validation**):
 
@@ -965,6 +983,9 @@ Keep these days free. Something will break.
 
 When working in this repository:
 
+- **Windows note:** Smart App Control blocks some compiled files and `.exe` launchers. Run tools through the venv interpreter: `.venv\Scripts\python.exe -m pytest`, `-m ruff`, `-m src.ingest.download_bts`. If a package fails with "DLL load failed … contrôle d'application", install a slightly older version (pandas is pinned `<3.1` for this reason).
+- **`config.yaml` keys used by the ingest scripts must not be renamed:** `data_dir`, `hubs`, `period.start/end`, `weather_buffer_days`, `radar.product`, `radar.crop_px`, `radar.frames_before_t_pred`, `radar.keep_national_days`, `t_pred_hours_before_departure`, `iem_sleep_seconds`. Other keys (splits, costs, chain threshold) can be added.
+
 0. **Never run git commands** (no `git add`, `commit`, `push`, `branch`, `checkout`, `pre-commit install`). The author handles version control manually. When a step is done, just list the files that changed.
 
 1. Follow the **Golden rules** (section 9) in all code. Refuse shortcuts that break them.
@@ -1031,4 +1052,5 @@ When working in this repository:
 | 2026-10 | Git handled manually by the author; AI assistants never run git commands | Full control over history |
 | 2026-10 | Rotation chains built per tail over continuous UTC time; long ground time (> 12 h) starts a new chain | Overnight rest/maintenance absorbs delays; red-eyes cross midnight |
 | 2026-10 | Chain break threshold chosen from the ground-time distribution; overnight stops and maintenance handled as chain breaks | Delay propagation mostly happens within an operating day |
+| 2026-10 | PC Parquet = master copy; develop joins in DuckDB; run the real Bronze/Silver/Gold pipeline + MLflow on Databricks; export Gold back | Real Databricks work for the CV, no data split, quota-proof |
 | 2026-10 | Repo private at start, public after cleanup (end of Phase 1–2) | Clean first impression; unlimited Actions minutes on public repos |

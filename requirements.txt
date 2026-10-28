@@ -1,27 +1,27 @@
 # Grouped by purpose. Versions are not pinned yet: once the pipeline works,
 # freeze the exact versions (pip freeze) so results are reproducible.
 
-# Config, downloads, utilities
-pyyaml
+# --- Needed by the download scripts (src/ingest/) ---
 requests
-tqdm
+pyyaml
+pandas<3.1         # 3.1.0's compiled files are blocked by Windows Smart App Control on the author's PC
+pyarrow            # Parquet (radar_needed_hours.parquet)
+airportsdata       # IATA -> ICAO, lat/lon, time zone
+tqdm               # progress bar (radar)
+numpy
+pillow             # read radar PNGs
+
+# --- Utilities ---
 python-dotenv
 
-# Data processing and storage
-pandas<3.1         # 3.1.0's compiled files are blocked by Windows Smart App Control on the author's PC
-numpy
+# --- Data processing and quality ---
 polars
 duckdb
-pyarrow
 pandera
 
-# Time zones, airports, holidays, weather parsing
-airportsdata
+# --- Holidays, weather parsing, plots ---
 holidays
 metar              # the python-metar library
-
-# Radar images
-pillow
 matplotlib
 
 # Classic ML and explainability
