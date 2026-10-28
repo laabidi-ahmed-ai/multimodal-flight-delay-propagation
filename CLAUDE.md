@@ -194,6 +194,8 @@ Notes:
 - `FlightDate` appears as `YYYY-MM-DD` in the data (the readme says `yyyymmdd`): parse explicitly and check.
 - METAR: some reports are corrections (`COR`) → keep the corrected version, drop the original; a trailing `$` means the station needs maintenance (keep, but note it); specials (`SPECI`, e.g. at 20:46) appear between hourly reports.
 - Thunderstorm info can appear in the remarks (`TS`, `CB`, `LTGICCG`, `TSB50`), not only in the main weather group: parse remarks too.
+- TAF files have **one row per forecast group** (`FM`, `TEMPO`, …), not one per TAF; `valid` = issue time, `fx_valid`/`fx_valid_end` = period of that group. KATL shows ~12.6 distinct issue times/day (routine TAFs: 4/day): **check duplicates vs. amendments with `product_id` / `is_amendment`** before choosing "latest TAF issued ≤ `T_pred`". Read `is_amendment` with an **explicit dtype** (pandas reports mixed types).
+- **Airport codes can change over time** (Palm Beach: `PBI` → `DJT` in BTS from Aug 2026, same `AirportID` 14027). Map renamed codes with `airport_aliases` in `config.yaml` (used by `build_station_list`), and in Silver identify airports by the stable BTS `OriginAirportID` / `DestAirportID`, not by the 3-letter code.
 
 ## 5. How the data links together
 
@@ -1053,4 +1055,5 @@ When working in this repository:
 | 2026-10 | Rotation chains built per tail over continuous UTC time; long ground time (> 12 h) starts a new chain | Overnight rest/maintenance absorbs delays; red-eyes cross midnight |
 | 2026-10 | Chain break threshold chosen from the ground-time distribution; overnight stops and maintenance handled as chain breaks | Delay propagation mostly happens within an operating day |
 | 2026-10 | PC Parquet = master copy; develop joins in DuckDB; run the real Bronze/Silver/Gold pipeline + MLflow on Databricks; export Gold back | Real Databricks work for the CV, no data split, quota-proof |
+| 2026-10 | Renamed airports handled by `airport_aliases` in `config.yaml` (first case: `DJT` → `PBI`); Silver keys airports on BTS `OriginAirportID` / `DestAirportID` | One physical airport = one station and one category for the model; BTS codes can change mid-period (PBI → DJT, Aug 2026) |
 | 2026-10 | Repo private at start, public after cleanup (end of Phase 1–2) | Clean first impression; unlimited Actions minutes on public repos |

@@ -35,6 +35,14 @@ def main() -> None:
         airports |= set(df.loc[df["Origin"].isin(hubs), "Dest"].dropna().unique())
         print(f"read {z.name}: {len(airports)} airports so far")
 
+    # Renamed airports: replace the new BTS code by the code airportsdata knows,
+    # so one physical airport gives one station (e.g. DJT -> PBI).
+    aliases = cfg.get("airport_aliases") or {}
+    for new_code, known_code in aliases.items():
+        if new_code in airports:
+            print(f"alias: {new_code} -> {known_code}")
+    airports = {aliases.get(code, code) for code in airports}
+
     db = airportsdata.load("IATA")
     rows, unknown = [], []
     for code in sorted(airports):

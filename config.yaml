@@ -11,6 +11,11 @@ period:
   start: 2024-01-01   # training 2024-2025; test 2026
   end: 2026-10-27
 
+# Airport codes that changed over time: {code seen in BTS: code known to airportsdata}.
+# Both codes are the same airport (same BTS AirportID), so they map to ONE station.
+airport_aliases:
+  DJT: PBI   # Palm Beach International: BTS uses PBI until Jul 2026, DJT from Aug 2026 (AirportID 14027)
+
 # Extra days of weather before the period start
 # (a flight on 1 Jan early morning needs the TAF issued on 31 Dec)
 weather_buffer_days: 2
