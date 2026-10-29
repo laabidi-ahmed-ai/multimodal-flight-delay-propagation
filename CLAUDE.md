@@ -152,9 +152,11 @@ All free. Verify each link works from your network in Phase 1 (setup).
 **Known limits:**
 - BTS cause columns are only filled for delays ≥ 15 min.
 - IEM rate limits: about **1 request/second per IP**; a request **without specific stations is capped at 24 hours** of data; since January 2026 a single request is capped at **1,000 station-years**. Always query **station by station**.
-- Radar `n0q` files are ~2–5 MB each; `n0r` ~0.3 MB. **Free disk: ~120 GB.** `n0q` hourly for Jan 2024 → Oct 2026 (~25,000 images) would take ~45–115 GB as national images, too close to the limit. **Policy: keep `n0q` (high quality) but crop-and-delete:** download a month → cut crops for the needed airports/hours → delete that month's national images (keep **one** month of national images for debugging). Crops keep full native resolution, so quality is unchanged. **Test one day first** (download speed, crop, colour → dBZ).
+- Radar `n0q` files are ~2–5 MB each; `n0r` ~0.3 MB. **Storage budget: ~120 GB free disk.** Used so far (2026-10-28): **~3.3 GB** (BTS 0.9 + METAR 1.0 + TAF 1.4; no radar yet). `n0q` hourly for Jan 2024 → Oct 2026 (~25,000 images) would take ~45–115 GB as national images, too close to the limit. **Policy: keep `n0q` (high quality) but crop-and-delete:** download a month → cut crops for the needed airports/hours → delete that month's national images (keep **one** month of national images for debugging). Crops keep full native resolution, so quality is unchanged. **Test one day first** (download speed, crop, colour → dBZ).
 - Crop size: decide once before the full run (e.g. 256×256 native pixels ≈ ±60 km around the airport). You can shrink crops later, never enlarge them without re-downloading.
 - Only crop what flights need: the 10 hubs at every hour, and destination airports at the hours used by flights (`T_pred` and the 2 hours before). Crops are cut **in memory while downloading**: national images are never saved (except `keep_national_days` in `config.yaml`), and crops are stored as **one compressed `.npz` per day**, not millions of small PNG files. The US composite covers the **contiguous US only**: Alaska/Hawaii/Puerto Rico destinations have no radar crop (listed in `skipped_airports.txt`; the model must handle a missing image).
+- **Radar crop padding:** a crop that reaches beyond the edge of the national image is filled with **255** there, not 0. In `n0q`, 0 = no echo (no rain), so 0-padding would turn "no data" into "clear sky"; 255 would be 95.5 dBZ, which never occurs in real weather, so it is reserved for "outside the image". Mask `== 255` before converting to dBZ.
+- **Radar grid check:** `download_radar` reads the day's first available hourly `.wld` (00:00, then 01:00, …) and stops if it differs from `radar.expected_wld` in `config.yaml` (n0q: 0.005° pixels, upper-left −126.0, 50.0; checked on 2024-01-01, 2025-07-15, 2026-10-27). `missing_files.txt` / `skipped_airports.txt` are merged with earlier runs and saved after each day. `radar_needed_hours --month` writes `radar_needed_hours_<YYYY_MM>.parquet`, never the full file (a one-month list would make `download_radar` save near-empty days as finished).
 - Not available for free (do not plan on them): historical FAA ground stops / ground delay programs (public page keeps only ~14 days; full history in FAA ASPM, which requires an FAA account), NOTAM history (no clean free bulk archive), and any open flight-by-flight delay dataset for Tunisia or Europe comparable to BTS.
 - Data is US-only. Say so explicitly; the method is general.
 
@@ -182,9 +184,9 @@ Run from the repo root, inside the virtual environment. All scripts read `config
 | 7 | `python -m src.ingest.download_radar` (full, overnight, resumable) | `raw/radar_crops/YYYY/MM/YYYYMMDD.npz` — keys `<IATA>_<YYYYMMDDHH>`, 256×256 uint8 raw palette values |
 
 Notes:
-- IEM uses 3-letter FAA ids for METAR (`ATL`) and 4-letter ICAO ids for TAF (`KATL`). Alaska/Hawaii ICAO codes start with `P` (e.g. `PANC`, `PHNL`), so ICAO codes come from `airportsdata`, never by prefixing `K`.
+- METAR station ids on IEM are **not always the IATA code**. Alaska/Hawaii/Puerto Rico/Virgin Islands need the ICAO code (`PANC`, `PHNL`, `TJSJ`; `ANC` returns nothing). Airports whose FAA id differs from the IATA code need the FAA/ICAO id: AZA→IWA, CLD→CRQ, FCA→GPI, HHH→HXD, MQT→SAW, SCE→UNV, YUM→NYL. `download_metar` therefore tries, per station: `weather_station_ids` override (`config.yaml`) → ICAO → FAA id (`airportsdata` `lid`) → IATA, keeps the first id with data, and records it in `raw/metar/_station_ids_used.csv`. TAF uses 4-letter ICAO ids (`KATL`). ICAO codes come from `airportsdata`, never by prefixing `K`.
 - BTS ZIPs may contain a readme next to the CSV: open the `.csv` member explicitly.
-- TAF service parameters (from the IEM form's curl example): `year1, month1, day1, hour1, minute1, year2, …, tz=UTC, fmt=comma`; the script tries `KATL` then `ATL`. Some small airports issue no TAF: that is normal.
+- TAF service parameters (from the IEM form's curl example): `year1, month1, day1, hour1, minute1, year2, …, tz=UTC, fmt=comma`; the script tries `KATL` then `ATL`. Some small airports issue no TAF: that is normal. Stations with no data are listed in `raw/metar/_no_data.txt` and `raw/taf/_no_data.txt`.
 - Radar missing images: `http_get` returns `None` only on a 404 (the image does not exist on the server, so retrying is useless); it is listed in `missing_files.txt` and the day is saved without it. Network/server errors raise after the retries instead: the run stops before that day's `.npz` is written, so the day is redone from scratch on restart.
 
 **Verified during setup (browser tests from Tunisia):** BTS ZIP ✅ (CSV ~26 MB compressed + `readme.html`), METAR ✅, TAF form ✅, radar PNG ✅.
@@ -195,7 +197,10 @@ Notes:
 - METAR: some reports are corrections (`COR`) → keep the corrected version, drop the original; a trailing `$` means the station needs maintenance (keep, but note it); specials (`SPECI`, e.g. at 20:46) appear between hourly reports.
 - Thunderstorm info can appear in the remarks (`TS`, `CB`, `LTGICCG`, `TSB50`), not only in the main weather group: parse remarks too.
 - TAF files have **one row per forecast group** (`FM`, `TEMPO`, …), not one per TAF; `valid` = issue time, `fx_valid`/`fx_valid_end` = period of that group. KATL shows ~12.6 distinct issue times/day (routine TAFs: 4/day): **check duplicates vs. amendments with `product_id` / `is_amendment`** before choosing "latest TAF issued ≤ `T_pred`". Read `is_amendment` with an **explicit dtype** (pandas reports mixed types).
-- **Airport codes can change over time** (Palm Beach: `PBI` → `DJT` in BTS from Aug 2026, same `AirportID` 14027). Map renamed codes with `airport_aliases` in `config.yaml` (used by `build_station_list`), and in Silver identify airports by the stable BTS `OriginAirportID` / `DestAirportID`, not by the 3-letter code.
+- **Airport codes can change over time** (Palm Beach: `PBI` → `DJT` in BTS from Aug 2026, same `AirportID` 14027). Map renamed codes with `airport_aliases` in `config.yaml` (used by `build_station_list`), and in Silver identify airports by the stable BTS `OriginAirportID` / `DestAirportID`, not by the 3-letter code. `radar_needed_hours` applies the same aliases to `Dest`.
+- **IEM can answer with a valid CSV that has only a header line** (unknown station id, no data). Treat it as **missing**, never as a successful download: the scripts do not save it and list the station in `_no_data.txt`.
+- **The Palm Beach rename is handled differently per source on IEM:** the METAR history was **moved** to `DJT` (`PBI`/`KPBI` return nothing, even for 2025); the TAF archive is **split**: `KPBI` until ~2026-07-09, `KDJT` after. `weather_station_ids` in `config.yaml` (`PBI: {metar: [DJT], taf: [KPBI, KDJT]}`) handles it; the two TAF ids are kept as **two raw files** (`KPBI.csv`, `KDJT.csv`) and merged in Silver (dedupe the overlap, keep the original `station` column).
+- **Incomplete weather coverage:** METAR for `WYS` (West Yellowstone, seasonal) starts 2024-04-29; `ROW` (Roswell) ends 2026-10-15 (station outage). **No TAF** for 8 airports: BLV, BQK, GRK, HHH (KHXD), MVY, SHD, VPS, YUM (KNYL), small or military/joint-use fields. The model must handle a missing TAF (like a missing radar crop).
 
 ## 5. How the data links together
 
@@ -208,7 +213,7 @@ Each source is like a separate notebook. To join two, you need a label present i
                     └──────────────┬───────────────┘
         ┌──────────────────┬───────┴────────┬────────────────────┐
         │                  │                │                    │
- tail number + date   airport code + time   airport lat/lon + time   (optional) tail number
+ tail no. + UTC time  airport code + time   airport lat/lon + time   (optional) tail number
         │                  │                │                    │
         ▼                  ▼                ▼                    ▼
  previous / next     METAR + TAF       radar crop           FAA registry
@@ -217,7 +222,7 @@ Each source is like a separate notebook. To join two, you need a label present i
 
 | Link | Key | Rule |
 |---|---|---|
-| Flight → rotation | `Tail_Number`, ordered by UTC departure (across dates) | Same aircraft; new chain after a long ground time (> 12 h) or a broken link |
+| Flight → rotation | `Tail_Number`, ordered by UTC departure (across dates) | Same aircraft; new chain when the ground time exceeds the threshold chosen from the data (`chain_break_ground_time_hours`) or the link is broken |
 | Flight → METAR | `Origin` → ICAO (`ATL` → `KATL`) + time | **Last report at or before the prediction moment** |
 | Flight → TAF | ICAO + time | **Latest forecast issued at or before the prediction moment**, valid at departure time |
 | Flight → radar (origin) | Origin lat/lon + time | Image at or just before `T_pred`, cropped around the origin |
@@ -270,7 +275,7 @@ Each source is like a separate notebook. To join two, you need a label present i
 - **Each season is seen twice.** Delays depend strongly on the season (summer thunderstorms, winter snow, holidays). With one year the model sees each month once; with two it learns what is typical, not what happened once.
 - **More storm days.** Severe-weather days are rare; the radar and text modalities need many examples of them.
 - **The years are similar.** Aeolus statistics: mean departure delay ≈ 12.2 min in 2023 and ≈ 12.6 min in 2024, so recent years behave alike and older data should not confuse the model.
-- **Cost is small:** storage ~20–90 GB (250 GB free), radar download about twice as long (overnight), same code.
+- **Cost is small:** storage ~15–25 GB with radar crop-and-delete (120 GB budget), radar download about twice as long (overnight), same code.
 
 ### How to do it safely
 1. **Download everything from the start** (`period.start: 2024-01-01` is already set in `config.yaml`).
@@ -351,25 +356,6 @@ Rule: **every tool must solve a real problem in this project.** No logos for the
 4. Screenshots: MLflow ablation, Databricks pipeline, Power BI dashboard
 5. GitHub Projects board
 
----|---|---|
-| Language | Python 3.11+ | Free |
-| Local exploration and joins | pandas / Polars, **DuckDB**, Parquet | Free |
-| Data platform (enterprise-style) | **Databricks Free Edition** (Spark SQL, Delta Lake) | Free |
-| Experiment tracking | **MLflow** | Free |
-| Baseline | XGBoost, scikit-learn | Free |
-| Deep learning | PyTorch, torchvision (ResNet18), Hugging Face (text embeddings) | Free |
-| Graph (stretch) | PyTorch Geometric | Free |
-| GPU training | Google Colab / Kaggle | Free |
-| Explainability | SHAP | Free |
-| LLM layer | An LLM API or open-source model (Hugging Face) | Free tier / free |
-| API | FastAPI | Free |
-| Demo | Streamlit (or Power BI Desktop for dashboards) | Free |
-| Packaging | Docker | Free |
-| CI/CD | GitHub Actions | Free |
-| Deployment | Hugging Face Spaces, or **Azure for Students** ($100/year credit, no card) | Free |
-| Weather parsing | A METAR parsing library (e.g. `python-metar`) | Free |
-| Geo | `airportsdata`, Pillow / NumPy for radar crops | Free |
-
 ---
 
 ## 8. Repository structure
@@ -383,10 +369,11 @@ flight-delay-multimodal/
 ├── .env                       # secrets (API keys) — NOT committed
 │
 │   DATA LIVES OUTSIDE THE REPO, at config.data_dir (e.g. C:\data\flight-delay\):
-│   ├── raw/                   # Bronze: downloaded files as-is
+│   ├── raw/                   # Bronze: downloaded files as-is (bts/, metar/, taf/, stations.csv)
+│   │   └── radar_crops/       # one compressed .npz per day: YYYY/MM/YYYYMMDD.npz,
+│   │                          #   keys <IATA>_<YYYYMMDDHH> -> 256x256 uint8 palette values
 │   ├── silver/                # cleaned, UTC, deduplicated
-│   ├── gold/                  # one row per flight, all features
-│   └── radar_crops/           # PNG crops: {ICAO}_{YYYYMMDDHHMM}.png
+│   └── gold/                  # one row per flight, all features
 ├── notebooks/
 │   ├── 01_explore_bts.ipynb
 │   ├── 02_explore_weather_radar.ipynb
@@ -488,7 +475,7 @@ Do not move on until you can answer the check questions without notes.
 - [ ] Decode 5 METARs by hand, then with a parsing library
 - [ ] Extract: wind speed, gusts, visibility, cloud ceiling, thunderstorm flag, precipitation
 - [ ] Read 3 TAFs; understand `FM`, `TEMPO`, `BECMG`, `AMD`
-- [ ] **Start the radar download script in the background** (n0r, 1 image/hour, 2025 → latest 2026)
+- [ ] **Start the radar download script in the background** (`n0q`, 1 image/hour, 2024 → latest 2026, crops only: test day first, then `radar_needed_hours`, then the full run)
 
 **Check questions**
 - What is the difference between METAR and TAF?
@@ -1038,7 +1025,7 @@ When working in this repository:
 | 2026-10 | Scope: 10 hubs, train 2025, test 2026 (**supersedes** an early suggestion of calendar year 2024 with 20–30 airports, which was chosen only because ADS-B overlapped then) | Feasible in 6 weeks; tested on recent data; ADS-B dropped so 2024 is no longer needed |
 | 2026-10 | `T_pred` = scheduled departure − 2 h | Realistic operational lead time; forces leakage-safe features |
 | 2026-10 | ADS-B dropped | Very large, optional, not needed for the core objective |
-| 2026-10 | Data stored outside repo/OneDrive; raw files kept | 250 GB free; reproducibility; avoid cloud sync |
+| 2026-10 | Data stored outside repo/OneDrive; raw files kept | 120 GB storage budget; reproducibility; avoid cloud sync |
 | 2026-10 | Tools: Python, DuckDB/Databricks Free Edition, MLflow, PyTorch, FastAPI, Streamlit, Docker, GitHub Actions, Azure for Students | Free; enterprise-relevant (Accenture–Databricks partnership) |
 | 2026-10 | Tool policy: core = Databricks, MLflow, pandera, Streamlit + pydeck, Hugging Face Spaces, GitHub Actions, ruff; extras = Power BI, Evidently, Azure, Codecov, demo video; skip Vercel, AWS, Kubernetes | Every tool must solve a real problem; visuals that recruiters see |
 | 2026-10 | Inputs include destination weather and radar; tabular encoder explicit; cost-style metric; cloud note + LinkedIn post as deliverables | Arrival conditions affect delays; evaluation and deliverables that recruiters value |
@@ -1052,8 +1039,8 @@ When working in this repository:
 | 2026-10 | PostgreSQL not needed (Could): the demo reads precomputed predictions from Parquet/DuckDB | Less setup; focus on the model |
 | 2026-10 | No separate "sample phase": exploration uses one month; code is parameterised by dates and run on everything once correct | Saves time under the 6-week deadline |
 | 2026-10 | Git handled manually by the author; AI assistants never run git commands | Full control over history |
-| 2026-10 | Rotation chains built per tail over continuous UTC time; long ground time (> 12 h) starts a new chain | Overnight rest/maintenance absorbs delays; red-eyes cross midnight |
+| 2026-10 | Rotation chains built per tail over continuous UTC time; a ground time above the data-chosen threshold (`chain_break_ground_time_hours`, set in Phase 1 step 1.2) starts a new chain | Overnight rest/maintenance absorbs delays; red-eyes cross midnight |
 | 2026-10 | Chain break threshold chosen from the ground-time distribution; overnight stops and maintenance handled as chain breaks | Delay propagation mostly happens within an operating day |
 | 2026-10 | PC Parquet = master copy; develop joins in DuckDB; run the real Bronze/Silver/Gold pipeline + MLflow on Databricks; export Gold back | Real Databricks work for the CV, no data split, quota-proof |
-| 2026-10 | Renamed airports handled by `airport_aliases` in `config.yaml` (first case: `DJT` → `PBI`); Silver keys airports on BTS `OriginAirportID` / `DestAirportID` | One physical airport = one station and one category for the model; BTS codes can change mid-period (PBI → DJT, Aug 2026) |
+| 2026-10 | Renamed airports handled by `airport_aliases` in `config.yaml` (first case: `DJT` → `PBI`; used by `build_station_list` and `radar_needed_hours`); Silver keys airports on BTS `OriginAirportID` / `DestAirportID`; IEM weather ids that differ from the code go in `weather_station_ids` (PBI: METAR `DJT`, TAF `KPBI` + `KDJT` as two raw files, merged in Silver) | One physical airport = one station and one category for the model; BTS codes can change mid-period (PBI → DJT, Aug 2026), and IEM handles the rename differently for METAR (history moved) and TAF (archive split) |
 | 2026-10 | Repo private at start, public after cleanup (end of Phase 1–2) | Clean first impression; unlimited Actions minutes on public repos |

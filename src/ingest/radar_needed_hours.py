@@ -6,11 +6,15 @@
   where T_pred = scheduled departure (UTC) - t_pred_hours_before_departure.
 
 Usage:  python -m src.ingest.radar_needed_hours
+        python -m src.ingest.radar_needed_hours --month 2025-07 --dry-run   # quick check
 Needs:  raw/bts/*.zip and raw/stations.csv
 Output: <data_dir>/raw/radar_needed_hours.parquet  (airport, hour_utc)
+        with --month: radar_needed_hours_<YYYY_MM>.parquet instead (never the full file)
+Renamed destinations are mapped with airport_aliases (config.yaml), e.g. DJT -> PBI.
 """
 from __future__ import annotations
 
+import argparse
 import zipfile
 from pathlib import Path
 
@@ -59,34 +63,68 @@ def scheduled_departure_utc(df: pd.DataFrame, tz_by_iata: dict[str, str]) -> pd.
 
 def main() -> None:
     cfg = load_config()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--month", help="YYYY-MM: only this BTS month and its hub hours (test)")
+    ap.add_argument("--dry-run", action="store_true", help="print the counts, write nothing")
+    args = ap.parse_args()
+
     hubs = set(cfg["hubs"])
+    aliases = cfg.get("airport_aliases") or {}
     raw = Path(cfg["data_dir"]) / "raw"
     stations = pd.read_csv(raw / "stations.csv")
     tz_by_iata = dict(zip(stations["iata"], stations["tz"], strict=True))
     offset = pd.Timedelta(hours=cfg["t_pred_hours_before_departure"])
     n_frames = cfg["radar"].get("frames_before_t_pred", 3)
 
+    pattern = f"bts_{args.month.replace('-', '_')}.zip" if args.month else "bts_*.zip"
+    zips = sorted((raw / "bts").glob(pattern))
+    if not zips:
+        raise SystemExit(f"No BTS file matches {pattern}.")
+
     parts = []
-    for z in sorted((raw / "bts").glob("bts_*.zip")):
+    for z in zips:
         df = read_bts(z, hubs)
+        # Renamed airports (DJT -> PBI): use the stations.csv code, so the crop is cut around
+        # the right coordinates instead of the destination being skipped as unknown.
+        dest = df["Dest"].replace(aliases).reset_index(drop=True)
         dep_utc = scheduled_departure_utc(df, tz_by_iata)
         t_pred_hour = (dep_utc - offset).dt.floor("h")
         for k in range(n_frames):
-            parts.append(pd.DataFrame({"airport": df["Dest"].values,
-                                       "hour_utc": (t_pred_hour - pd.Timedelta(hours=k)).values}))
+            # Keep the Series (tz-aware UTC). `.values` would drop the time zone, giving naive
+            # times that do not match the UTC hub rows below (object column, missed duplicates).
+            parts.append(pd.DataFrame({
+                "airport": dest,
+                "hour_utc": (t_pred_hour - pd.Timedelta(hours=k)).reset_index(drop=True),
+            }))
         print(f"{z.name}: {len(df):,} hub departures")
 
-    dest = pd.concat(parts).dropna().drop_duplicates()
+    dest_rows = pd.concat(parts).dropna().drop_duplicates()
 
-    start, end = period(cfg, buffer_days=1)
-    all_hours = pd.date_range(pd.Timestamp(start, tz="UTC"),
-                              pd.Timestamp(end, tz="UTC") + pd.Timedelta(hours=23),
-                              freq="h")
+    if args.month:
+        start = pd.Timestamp(f"{args.month}-01", tz="UTC")
+        last_hour = start + pd.offsets.MonthBegin(1) - pd.Timedelta(hours=1)
+    else:
+        start_day, end_day = period(cfg, buffer_days=1)
+        start = pd.Timestamp(start_day, tz="UTC")
+        last_hour = pd.Timestamp(end_day, tz="UTC") + pd.Timedelta(hours=23)
+    all_hours = pd.date_range(start, last_hour, freq="h")
     hub_rows = pd.DataFrame([(h, t) for h in sorted(hubs) for t in all_hours],
                             columns=["airport", "hour_utc"])
 
-    needed = pd.concat([hub_rows, dest]).drop_duplicates().sort_values(["hour_utc", "airport"])
-    out = raw / "radar_needed_hours.parquet"
+    needed = (pd.concat([hub_rows, dest_rows]).drop_duplicates()
+              .sort_values(["hour_utc", "airport"]))
+    print(f"hour_utc dtype: {needed['hour_utc'].dtype}; "
+          f"{len(hub_rows):,} hub rows + {len(dest_rows):,} destination rows "
+          f"-> {len(needed):,} unique pairs")
+    if args.dry_run:
+        print("Dry run: nothing written.")
+        return
+    # A one-month list must never replace the full one: download_radar would then crop almost
+    # nothing on the other days, save them as finished .npz files and skip them forever.
+    # download_radar only reads radar_needed_hours.parquet, so the month file is for checks.
+    name = (f"radar_needed_hours_{args.month.replace('-', '_')}.parquet" if args.month
+            else "radar_needed_hours.parquet")
+    out = raw / name
     needed.to_parquet(out, index=False)
     print(f"\nSaved {len(needed):,} (airport, hour) pairs "
           f"for {needed['airport'].nunique()} airports to {out}")

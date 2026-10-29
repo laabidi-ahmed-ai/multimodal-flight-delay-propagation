@@ -16,6 +16,14 @@ period:
 airport_aliases:
   DJT: PBI   # Palm Beach International: BTS uses PBI until Jul 2026, DJT from Aug 2026 (AirportID 14027)
 
+# IEM weather station ids to try FIRST for a station, keyed by its stations.csv (IATA) code.
+# Needed when IEM's archive does not follow the code: after the PBI -> DJT rename, IEM moved
+# the WHOLE Palm Beach METAR history to DJT (PBI/KPBI return nothing, even for 2025), but
+# split the TAF archive: KPBI until ~2026-07-09, KDJT after. Each TAF id is saved as its own
+# raw file (KPBI.csv, KDJT.csv); the two are merged in Silver (dedupe the overlap).
+weather_station_ids:
+  PBI: {metar: [DJT], taf: [KPBI, KDJT]}
+
 # Extra days of weather before the period start
 # (a flight on 1 Jan early morning needs the TAF issued on 31 Dec)
 weather_buffer_days: 2
@@ -25,6 +33,11 @@ radar:
   crop_px: 256        # square crop size in native pixels (n0q: ~0.005 deg/pixel -> ~140 km wide)
   frames_before_t_pred: 3   # hourly frames needed at and before T_pred
   keep_national_days: [2025-07-15]   # national images kept on disk for debugging only
+  # Expected .wld georeference of the national image: [A, D, B, E, C, F] = pixel width (deg),
+  # 2 rotation terms, pixel height (deg, negative), upper-left lon, upper-left lat.
+  # Checked on 2024-01-01, 2025-07-15 and 2026-10-27 (n0q). download_radar stops if a .wld
+  # differs: crops would otherwise be cut at the wrong place without any error.
+  expected_wld: [0.005, 0.0, 0.0, -0.005, -126.0, 50.0]
 
 # Prediction moment: scheduled departure minus this many hours
 t_pred_hours_before_departure: 2

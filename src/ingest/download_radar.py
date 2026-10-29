@@ -13,8 +13,12 @@ Usage:
 Output: <data_dir>/raw/radar_crops/YYYY/MM/YYYYMMDD.npz
         one compressed file per day; keys "<IATA>_<YYYYMMDDHH>" -> uint8 array (crop_px x crop_px)
         of raw palette values (convert to dBZ later, see IEM docs).
+        Value 255 = outside the national image (crop near the edge): NOT "no rain" (0).
 Coverage: the US composite covers the contiguous US only; airports outside it
 (e.g. Alaska, Hawaii, Puerto Rico) are skipped and listed in skipped_airports.txt.
+Missing server files are listed in missing_files.txt. Both lists are merged with earlier
+runs, never overwritten.
+Grid: every .wld read must match radar.expected_wld (config.yaml), otherwise the run stops.
 Docs: https://mesonet.agron.iastate.edu/docs/nexrad_mosaic/
 """
 from __future__ import annotations
@@ -35,14 +39,30 @@ from src.ingest.utils import http_get, load_config, period, raw_dir, save_atomic
 BASE = "https://mesonet.agron.iastate.edu/archive/data/{t:%Y/%m/%d}/GIS/uscomp/{name}"
 
 
-def read_world_file(text: str) -> tuple[float, float, float, float]:
-    """ESRI world file: A, D, B, E, C, F -> (pixel_w, pixel_h, lon_ul, lat_ul)."""
-    a, _d, _b, e, c, f = (float(x) for x in text.split())
+OUTSIDE = 255   # fill value for crop pixels beyond the edge of the national image
+
+
+def read_world_file(text: str, expected: list[float]) -> tuple[float, float, float, float]:
+    """ESRI world file: A, D, B, E, C, F -> (pixel_w, pixel_h, lon_ul, lat_ul).
+
+    Stops the run if the grid differs from `expected` (config radar.expected_wld): a changed
+    grid would silently shift every crop.
+    """
+    values = [float(x) for x in text.split()]
+    if len(values) != 6 or not np.allclose(values, expected):
+        raise SystemExit(f"Radar grid changed: .wld = {values}, expected {expected}. "
+                         "Check the IEM docs before cropping more days.")
+    a, _d, _b, e, c, f = values
     return a, e, c, f
 
 
 def crop(img: np.ndarray, lat: float, lon: float, wld, size: int) -> np.ndarray | None:
-    """Square crop centred on (lat, lon), zero-padded at the edges. None if outside the image."""
+    """Square crop centred on (lat, lon). None if the airport is outside the image.
+
+    Pixels beyond the image edge are filled with OUTSIDE (255), not 0: 0 means "no echo"
+    (no rain), so padding with 0 would turn "no data" into "clear sky". In n0q, 255 would be
+    95.5 dBZ, which does not occur in real weather, so it is safe to reserve it.
+    """
     a, e, c, f = wld
     col = int(round((lon - c) / a))
     row = int(round((lat - f) / e))
@@ -50,7 +70,7 @@ def crop(img: np.ndarray, lat: float, lon: float, wld, size: int) -> np.ndarray 
     if not (0 <= row < h and 0 <= col < w):
         return None
     half = size // 2
-    out = np.zeros((size, size), dtype=np.uint8)
+    out = np.full((size, size), OUTSIDE, dtype=np.uint8)
     r0, r1, c0, c1 = row - half, row - half + size, col - half, col - half + size
     rr0, rr1, cc0, cc1 = max(r0, 0), min(r1, h), max(c0, 0), min(c1, w)
     out[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0] = img[rr0:rr1, cc0:cc1]
@@ -107,7 +127,12 @@ def main() -> None:
         by_hour.setdefault(t, []).append(airport)
 
     crops_root = raw_dir(cfg, "radar_crops")
-    skipped, missing = set(), []
+    skipped_path = crops_root / "skipped_airports.txt"
+    missing_path = crops_root / "missing_files.txt"
+    # Lists from earlier runs are kept and merged, never overwritten (no silent loss).
+    skipped = read_lines(skipped_path)
+    missing = read_lines(missing_path)
+    n_missing_before = len(missing)
     for day in tqdm(days, desc="days"):
         out = crops_root / f"{day:%Y/%m}" / f"{day:%Y%m%d}.npz"
         if out.exists():
@@ -115,15 +140,25 @@ def main() -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         keep = day in keep_days
         nat_dir = raw_dir(cfg, f"radar_national/{day:%Y/%m/%d}") if keep else None
+        # This day is (re)done now: forget what an earlier run found missing for it.
+        missing = {m for m in missing if f"_{day:%Y%m%d}" not in m}
 
-        wld_name = f"{product}_{day:%Y%m%d}0000.wld"
-        r = http_get(BASE.format(t=day, name=wld_name))
-        if r is None:
-            missing.append(wld_name)
+        # Georeference: one .wld per hour exists; use the first available one of the day.
+        wld = None
+        for hh in range(24):
+            wld_name = f"{product}_{day:%Y%m%d}{hh:02d}00.wld"
+            r = http_get(BASE.format(t=day, name=wld_name))
+            time.sleep(sleep)                      # after EVERY request, 404s included
+            if r is not None:
+                wld = read_world_file(r.text, rcfg["expected_wld"])
+                if keep:
+                    (nat_dir / wld_name).write_text(r.text)
+                break
+        if wld is None:
+            # No .wld at all this day: no .npz is written, so the day is retried on restart.
+            missing.add(f"{product}_{day:%Y%m%d}_all_wld")
+            write_lines(missing_path, missing)
             continue
-        wld = read_world_file(r.text)
-        if keep:
-            (nat_dir / wld_name).write_text(r.text)
 
         day_crops: dict[str, np.ndarray] = {}
         for hh in range(24):
@@ -133,13 +168,14 @@ def main() -> None:
                 continue
             name = f"{product}_{t:%Y%m%d%H}00.png"
             r = http_get(BASE.format(t=t, name=name))
+            time.sleep(sleep)                      # after EVERY request, 404s included
             # http_get returns None only on 404: the image does not exist on the server, so
             # retrying is useless; it is listed in missing_files.txt and the day is saved
             # without it.
             # Network/server errors raise after the retries instead: the run stops before this
             # day's .npz is written, so the day is redone from scratch on restart.
             if r is None:
-                missing.append(name)
+                missing.add(name)
                 continue
             if keep:
                 save_atomic(nat_dir / name, r.content)
@@ -153,16 +189,28 @@ def main() -> None:
                     skipped.add(ap_code)
                     continue
                 day_crops[f"{ap_code}_{t:%Y%m%d%H}"] = c
-            time.sleep(sleep)
 
         tmp = out.with_name(out.stem + ".part.npz")
         np.savez_compressed(tmp, **day_crops)
         tmp.replace(out)
+        # Save the lists after every finished day, so a crash later keeps them in sync
+        # with the .npz files already on disk.
+        write_lines(skipped_path, skipped)
+        write_lines(missing_path, missing)
 
-    (crops_root / "skipped_airports.txt").write_text("\n".join(sorted(skipped)), encoding="utf-8")
-    (crops_root / "missing_files.txt").write_text("\n".join(missing), encoding="utf-8")
-    print(f"\nDone. {len(missing)} missing files, {len(skipped)} airports outside coverage "
-          f"(lists in {crops_root}).")
+    print(f"\nDone. {len(missing)} missing files ({len(missing) - n_missing_before:+d} this run), "
+          f"{len(skipped)} airports outside coverage (lists in {crops_root}).")
+
+
+def read_lines(path: Path) -> set[str]:
+    """Non-empty lines of a text file, or an empty set if it does not exist."""
+    if not path.exists():
+        return set()
+    return {ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()}
+
+
+def write_lines(path: Path, lines: set[str]) -> None:
+    path.write_text("".join(f"{ln}\n" for ln in sorted(lines)), encoding="utf-8")
 
 
 if __name__ == "__main__":

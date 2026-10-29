@@ -108,7 +108,7 @@ Explanation:
 ```mermaid
 flowchart LR
     A[BTS flight records] --> T[Tabular encoder]
-    A --> R[Rotation builder<br/>tail number + date] --> G[GRU / GNN]
+    A --> R[Rotation builder<br/>per tail, continuous UTC time<br/>break at long ground time] --> G[GRU / GNN]
     M[METAR / TAF text] --> L[Language-model<br/>embeddings]
     X[Radar mosaics] --> C[Crop around airport] --> N[CNN ResNet18]
     T --> F[Cross-attention fusion]
@@ -157,7 +157,7 @@ Every source is joined to the flight record through a shared **key**:
 
 | Link | Key | Rule |
 |---|---|---|
-| Flight → aircraft rotation | Tail number + date | Same aircraft, same day, ordered by UTC departure |
+| Flight → aircraft rotation | Tail number, ordered by UTC departure (across midnight) | Same aircraft over continuous UTC time; a new chain starts when the ground time exceeds a threshold chosen from the data (gap between quick turnarounds and overnight stops) |
 | Flight → METAR | Airport code (`ATL` → `KATL`) + time | Last observation **at or before** the prediction moment |
 | Flight → TAF | Airport code + time | Latest forecast issued **at or before** the prediction moment, valid at departure |
 | Flight → radar | Airport latitude/longitude + time | Image at or before the prediction moment, cropped around the airport |
@@ -253,17 +253,6 @@ Demo link: *coming soon*
 | Project management | GitHub Projects |
 | Extras (planned if time allows) | Power BI dashboard, Evidently drift reports, demo video |
 
----|---|
-| Language | Python 3.11+ |
-| Data processing | pandas / Polars, DuckDB, Parquet, Databricks Free Edition (Spark SQL, Delta Lake) |
-| Machine learning | XGBoost, scikit-learn |
-| Deep learning | PyTorch, torchvision, Hugging Face Transformers, PyTorch Geometric (extension) |
-| Experiment tracking | MLflow |
-| Explainability | SHAP, LLM-generated briefings |
-| Serving | FastAPI, Streamlit |
-| MLOps | Docker, GitHub Actions (CI), pytest |
-| Deployment | Hugging Face Spaces / Azure |
-
 ---
 
 ## Repository structure
@@ -312,7 +301,7 @@ pip install -r requirements.txt
 # 4. Download data, build the dataset, train (scripts in `src/ingest/`; next phases add the pipeline and training)
 ```
 
-Planned approximate storage: **20–90 GB** depending on radar resolution.
+Planned approximate storage: **~15–25 GB** (radar national images are cropped in memory and not kept; only small per-day crop files are stored).
 
 ---
 

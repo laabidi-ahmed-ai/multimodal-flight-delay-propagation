@@ -63,3 +63,19 @@ def save_atomic(path: Path, content: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".part")
     tmp.write_bytes(content)
     tmp.replace(path)
+
+
+def update_no_data(path: Path, attempted: set[str], failures: dict[str, str]) -> None:
+    """Rewrite the no-data list: this run's failures + earlier entries not retried this run.
+
+    A station retried this run is dropped from the old list (it either succeeded, or it is
+    in `failures` again), so nothing is lost silently and fixed stations disappear.
+    """
+    old = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                old[line.split()[0]] = line
+    kept = {code: line for code, line in old.items() if code not in attempted}
+    kept.update({code: f"{code}  tried: {tried}" for code, tried in failures.items()})
+    path.write_text("".join(f"{kept[c]}\n" for c in sorted(kept)), encoding="utf-8")
