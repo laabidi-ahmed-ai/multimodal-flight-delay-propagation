@@ -30,7 +30,11 @@ weather_buffer_days: 2
 
 radar:
   product: n0q        # n0q = high resolution (~2-5 MB/image) | n0r = low resolution (~0.3 MB)
-  crop_px: 256        # square crop size in native pixels (n0q: ~0.005 deg/pixel -> ~140 km wide)
+  # Square crop size in native pixels. 384 px x 0.005 deg ~ 213 km north-south,
+  # ~ 178 km east-west at ATL (longitude degrees shrink with latitude).
+  # 384 (not 256): a storm moving 40-50 km/h covers ~100 km in the 2 h between T_pred and
+  # departure; 256 px would see only ~+-70 km. Changing this value needs ALL crops redone.
+  crop_px: 384
   frames_before_t_pred: 3   # hourly frames needed at and before T_pred
   keep_national_days: [2025-07-15]   # national images kept on disk for debugging only
   # Expected .wld georeference of the national image: [A, D, B, E, C, F] = pixel width (deg),
@@ -38,6 +42,9 @@ radar:
   # Checked on 2024-01-01, 2025-07-15 and 2026-10-27 (n0q). download_radar stops if a .wld
   # differs: crops would otherwise be cut at the wrong place without any error.
   expected_wld: [0.005, 0.0, 0.0, -0.005, -126.0, 50.0]
+  # Expected national image size [rows, columns] on that grid: 27 deg / 0.005 x 61 deg / 0.005.
+  # download_radar stops if a PNG has another size (the .wld would no longer describe it).
+  expected_shape: [5400, 12200]
 
 # Prediction moment: scheduled departure minus this many hours
 t_pred_hours_before_departure: 2

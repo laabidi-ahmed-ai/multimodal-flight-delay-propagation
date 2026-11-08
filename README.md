@@ -301,7 +301,7 @@ pip install -r requirements.txt
 # 4. Download data, build the dataset, train (scripts in `src/ingest/`; next phases add the pipeline and training)
 ```
 
-Planned approximate storage: **~15–25 GB** (radar national images are cropped in memory and not kept; only small per-day crop files are stored).
+Planned approximate storage: **~40 GB** (radar national images are cropped in memory and not kept; only per-day files of 384×384 crops around each airport are stored, ~34 GB).
 
 ---
 

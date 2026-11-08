@@ -9,7 +9,39 @@
 
 ---
 
+## 0. Current status and next steps
+
+> **Keep this section updated after every step** (Claude Code updates it at the end of each task).
+> Last update: 2026-11-07 (radar crop size 256 → 384 px).
+
+**Phase:** 1 (Understand and connect the data). Step 1.1 setup done; downloads partly done.
+
+**Done**
+- Repo scaffold, venv, `config.yaml`, ruff config (passes).
+- **BTS:** 32 months, 2024-01 → 2026-08 (2026-09/10 not published yet), 0.9 GB.
+- **stations.csv:** 314 airports (10 hubs + destinations), Palm Beach once (`PBI, KDJT`).
+- **METAR:** 314/314 airports with data (24 via a non-IATA id, see `_station_ids_used.csv`).
+- **TAF:** 306/314 airports (+ Palm Beach as two files `KPBI` + `KDJT`); 8 without TAF.
+- Radar scripts reviewed and fixed (grid + image-size checks, 255 padding, merged logs, sleeps, `--start/--end`, incremental resume that completes days missing crops, crop-size check on existing `.npz`).
+- Radar test day 2025-07-15 run once at **256 px** (240 hub crops, 0.9 MB). **Crop size then changed to 384 px** → that file must be deleted by Ahmed and the test day redone.
+- `docs/learning_log.md` template created.
+- `notebooks/01_explore_bts.ipynb` **batch 1 written** (sections 0–6, July 2025): setup, counts, flight key, cancelled/diverted/tail, delay distribution, delay by hour/hub/airline, cause columns. Code tested outside Jupyter (runs; 631,428 rows ✅, key unique ✅, `DepDel15` check 0 mismatches ✅). **Not yet run by Ahmed; "My answer" cells empty.**
+
+**Not started yet**
+- Notebook 01 batch 2 (UTC times, one tail through a day, ground-time distribution → `chain_break_ground_time_hours`, consistency check, summary).
+- Radar at 384 px (test day redo, `radar_needed_hours`, full run).
+- Notebooks 02–03, tests, Silver/Gold, data-quality report, models.
+
+**Next steps (in order)**
+1. Delete the old 256 px test file `C:\data\flight-delay\raw\radar_crops\2025\07\20250715.npz`, then redo the radar test day at 384 px: `.venv\Scripts\python.exe -m src.ingest.download_radar --test-day 2025-07-15` (time it; inspect: ATL at pixel (192, 192), does 255 appear inside the real image, storms vs. METAR `TS`).
+2. `.venv\Scripts\python.exe -m src.ingest.radar_needed_hours` (full).
+3. Full radar run, overnight, resumable: `.venv\Scripts\python.exe -m src.ingest.download_radar` (or in slices with `--start/--end`). When a new BTS month is published: `download_bts` → `radar_needed_hours` → `download_radar` (completes the days that miss crops).
+4. Meanwhile: run notebook 01 batch 1 and write the "My answer" cells; then ask for batch 2 (incl. ground-time distribution → `chain_break_ground_time_hours`, value chosen by Ahmed).
+
+---
+
 ## Table of contents
+0. [Current status and next steps](#0-current-status-and-next-steps)
 1. [The objective](#1-the-objective)
 2. [The final product: input → output](#2-the-final-product-input--output)
 3. [The modalities](#3-the-modalities)
@@ -152,11 +184,12 @@ All free. Verify each link works from your network in Phase 1 (setup).
 **Known limits:**
 - BTS cause columns are only filled for delays ≥ 15 min.
 - IEM rate limits: about **1 request/second per IP**; a request **without specific stations is capped at 24 hours** of data; since January 2026 a single request is capped at **1,000 station-years**. Always query **station by station**.
-- Radar `n0q` files are ~2–5 MB each; `n0r` ~0.3 MB. **Storage budget: ~120 GB free disk.** Used so far (2026-10-28): **~3.3 GB** (BTS 0.9 + METAR 1.0 + TAF 1.4; no radar yet). `n0q` hourly for Jan 2024 → Oct 2026 (~25,000 images) would take ~45–115 GB as national images, too close to the limit. **Policy: keep `n0q` (high quality) but crop-and-delete:** download a month → cut crops for the needed airports/hours → delete that month's national images (keep **one** month of national images for debugging). Crops keep full native resolution, so quality is unchanged. **Test one day first** (download speed, crop, colour → dBZ).
-- Crop size: decide once before the full run (e.g. 256×256 native pixels ≈ ±60 km around the airport). You can shrink crops later, never enlarge them without re-downloading.
+- Radar `n0q` files are ~2–5 MB each; `n0r` ~0.3 MB. **Storage budget: ~120 GB free disk.** Used so far (2026-10-28): **~3.3 GB** (BTS 0.9 + METAR 1.0 + TAF 1.4; no radar yet). Expected at the end: **~34 GB of radar crops (384 px), ~40 GB in total**. `n0q` hourly for Jan 2024 → Oct 2026 (~25,000 images) would take ~45–115 GB as national images, too close to the limit. **Policy: keep `n0q` (high quality) but crop-and-delete:** download a month → cut crops for the needed airports/hours → delete that month's national images (keep **one** month of national images for debugging). Crops keep full native resolution, so quality is unchanged. **Test one day first** (download speed, crop, colour → dBZ).
+- Crop size: **384 px** (384 px × 0.005° ≈ 213 km north–south, ≈ 178 km east–west at ATL (longitude degrees shrink with latitude)); the airport is at pixel **(192, 192)**. Decide once before the full run: you can shrink crops later, never enlarge them without re-downloading. `download_radar` stops if an existing `.npz` holds crops of another size (old files must be deleted, never mixed).
 - Only crop what flights need: the 10 hubs at every hour, and destination airports at the hours used by flights (`T_pred` and the 2 hours before). Crops are cut **in memory while downloading**: national images are never saved (except `keep_national_days` in `config.yaml`), and crops are stored as **one compressed `.npz` per day**, not millions of small PNG files. The US composite covers the **contiguous US only**: Alaska/Hawaii/Puerto Rico destinations have no radar crop (listed in `skipped_airports.txt`; the model must handle a missing image).
 - **Radar crop padding:** a crop that reaches beyond the edge of the national image is filled with **255** there, not 0. In `n0q`, 0 = no echo (no rain), so 0-padding would turn "no data" into "clear sky"; 255 would be 95.5 dBZ, which never occurs in real weather, so it is reserved for "outside the image". Mask `== 255` before converting to dBZ.
-- **Radar grid check:** `download_radar` reads the day's first available hourly `.wld` (00:00, then 01:00, …) and stops if it differs from `radar.expected_wld` in `config.yaml` (n0q: 0.005° pixels, upper-left −126.0, 50.0; checked on 2024-01-01, 2025-07-15, 2026-10-27). `missing_files.txt` / `skipped_airports.txt` are merged with earlier runs and saved after each day. `radar_needed_hours --month` writes `radar_needed_hours_<YYYY_MM>.parquet`, never the full file (a one-month list would make `download_radar` save near-empty days as finished).
+- **Radar grid check:** `download_radar` reads the day's first available hourly `.wld` (00:00, then 01:00, …) and stops if it differs from `radar.expected_wld` in `config.yaml` (n0q: 0.005° pixels, upper-left −126.0, 50.0; checked on 2024-01-01, 2025-07-15, 2026-10-27). It also stops if a national PNG is not `radar.expected_shape` = 5400 × 12200 pixels (27° / 0.005 × 61° / 0.005). `missing_files.txt` / `skipped_airports.txt` are merged with earlier runs and saved after each day.
+- **Radar resume is incremental:** a day counts as done only if its `.npz` holds **every** crop key needed now (from `radar_needed_hours.parquet`), not counting PNGs listed in `missing_files.txt` (404 on the server) and airports in `skipped_airports.txt`. Otherwise the script fetches only the missing hours and saves the merged `.npz` atomically. Example: 2026-09-01 is first saved with hub hours only; when BTS September is published (rerun `radar_needed_hours`, then `download_radar`), its destination crops are added instead of the day being skipped forever. `radar_needed_hours --month` writes `radar_needed_hours_<YYYY_MM>.parquet`, never the full file (a one-month list would make `download_radar` save near-empty days as finished).
 - Not available for free (do not plan on them): historical FAA ground stops / ground delay programs (public page keeps only ~14 days; full history in FAA ASPM, which requires an FAA account), NOTAM history (no clean free bulk archive), and any open flight-by-flight delay dataset for Tunisia or Europe comparable to BTS.
 - Data is US-only. Say so explicitly; the method is general.
 
@@ -181,7 +214,7 @@ Run from the repo root, inside the virtual environment. All scripts read `config
 | 4 | `python -m src.ingest.download_taf --hubs-only` (test) then without the flag | `raw/taf/<ICAO>.csv` |
 | 5 | `python -m src.ingest.download_radar --test-day 2025-07-15` (test: hubs only, national images kept to inspect) | `raw/radar_national/2025/07/15/` + `raw/radar_crops/2025/07/20250715.npz` |
 | 6 | `python -m src.ingest.radar_needed_hours` | `raw/radar_needed_hours.parquet` (hubs every hour + destinations at the hours flights need) |
-| 7 | `python -m src.ingest.download_radar` (full, overnight, resumable) | `raw/radar_crops/YYYY/MM/YYYYMMDD.npz` — keys `<IATA>_<YYYYMMDDHH>`, 256×256 uint8 raw palette values |
+| 7 | `python -m src.ingest.download_radar` (full, overnight, resumable; optional `--start/--end YYYY-MM-DD` to download in slices; default end = day after the last BTS month on disk, not today) | `raw/radar_crops/YYYY/MM/YYYYMMDD.npz` — keys `<IATA>_<YYYYMMDDHH>`, 384×384 uint8 raw palette values |
 
 Notes:
 - METAR station ids on IEM are **not always the IATA code**. Alaska/Hawaii/Puerto Rico/Virgin Islands need the ICAO code (`PANC`, `PHNL`, `TJSJ`; `ANC` returns nothing). Airports whose FAA id differs from the IATA code need the FAA/ICAO id: AZA→IWA, CLD→CRQ, FCA→GPI, HHH→HXD, MQT→SAW, SCE→UNV, YUM→NYL. `download_metar` therefore tries, per station: `weather_station_ids` override (`config.yaml`) → ICAO → FAA id (`airportsdata` `lid`) → IATA, keeps the first id with data, and records it in `raw/metar/_station_ids_used.csv`. TAF uses 4-letter ICAO ids (`KATL`). ICAO codes come from `airportsdata`, never by prefixing `K`.
@@ -260,10 +293,10 @@ Each source is like a separate notebook. To join two, you need a label present i
 | Training | **2024 + 2025** (two full seasonal cycles). See "Why 2024 + 2025" below |
 | Validation | First published months of 2026 (e.g. Jan–Feb) |
 | Test | Remaining published months of 2026 (check BTS availability) |
-| Radar | `n0q`, 1 image/hour, **256×256 crop** (`radar.crop_px` in `config.yaml`, ~140 km wide) per airport, last 3 hourly frames. National images are **not** kept (crop in memory; one debug day kept). Models may downsample crops (e.g. to 128×128) at training time. |
+| Radar | `n0q`, 1 image/hour, **384×384 crop** (`radar.crop_px` in `config.yaml`; 384 px × 0.005° ≈ 213 km north–south, ≈ 178 km east–west at ATL (longitude degrees shrink with latitude)) per airport, last 3 hourly frames. National images are **not** kept (crop in memory; one debug day kept). Models may downsample crops (e.g. to 128×128) at training time. |
 | Data location | **Outside the repo and outside OneDrive**, e.g. `C:\data\flight-delay\`, read from `config.yaml` (`data_dir`) |
 | Raw files | BTS, METAR, TAF **kept**. Radar national images **deleted after cropping** (one month kept for debugging) |
-| Expected total size | ~15–25 GB with crop-and-delete (120 GB free); never keep all national `n0q` images |
+| Expected total size | ~40 GB in total (~34 GB of 384 px radar crops + BTS/METAR/TAF) with crop-and-delete (120 GB budget); never keep all national `n0q` images |
 | Prediction moment | **2 hours before scheduled departure** |
 | Graph | Rotation features + GRU; GNN only if time remains |
 | ADS-B | Dropped (the 2024 adsb.lol archive alone is ~1,455 GiB; not needed for the core objective) |
@@ -275,7 +308,7 @@ Each source is like a separate notebook. To join two, you need a label present i
 - **Each season is seen twice.** Delays depend strongly on the season (summer thunderstorms, winter snow, holidays). With one year the model sees each month once; with two it learns what is typical, not what happened once.
 - **More storm days.** Severe-weather days are rare; the radar and text modalities need many examples of them.
 - **The years are similar.** Aeolus statistics: mean departure delay ≈ 12.2 min in 2023 and ≈ 12.6 min in 2024, so recent years behave alike and older data should not confuse the model.
-- **Cost is small:** storage ~15–25 GB with radar crop-and-delete (120 GB budget), radar download about twice as long (overnight), same code.
+- **Cost is small:** storage ~40 GB in total with radar crop-and-delete (120 GB budget), radar download about twice as long (overnight), same code.
 
 ### How to do it safely
 1. **Download everything from the start** (`period.start: 2024-01-01` is already set in `config.yaml`).
@@ -371,7 +404,7 @@ flight-delay-multimodal/
 │   DATA LIVES OUTSIDE THE REPO, at config.data_dir (e.g. C:\data\flight-delay\):
 │   ├── raw/                   # Bronze: downloaded files as-is (bts/, metar/, taf/, stations.csv)
 │   │   └── radar_crops/       # one compressed .npz per day: YYYY/MM/YYYYMMDD.npz,
-│   │                          #   keys <IATA>_<YYYYMMDDHH> -> 256x256 uint8 palette values
+│   │                          #   keys <IATA>_<YYYYMMDDHH> -> 384x384 uint8 palette values
 │   ├── silver/                # cleaned, UTC, deduplicated
 │   └── gold/                  # one row per flight, all features
 ├── notebooks/
@@ -485,7 +518,7 @@ Do not move on until you can answer the check questions without notes.
 **Tasks**
 - [ ] Open one PNG and its `.wld` file
 - [ ] Convert ATL lat/lon to pixel coordinates using the `.wld` values
-- [ ] Crop 256×256 around ATL (already done by `download_radar --test-day`; inspect it)
+- [ ] Crop 384×384 around ATL (already done by `download_radar --test-day`; inspect it: ATL at pixel (192, 192))
 - [ ] Map colours/pixel values to storm intensity (dBZ)
 - [ ] Display a crop during a known storm next to the matching METAR
 
@@ -610,7 +643,7 @@ Do not move on until you can answer the check questions without notes.
 - [ ] Compare: raw coded text vs. decoded sentences vs. parsed numbers
 
 #### Step 3.3: Image encoder
-- [ ] Pretrained ResNet18 on the crops (256×256, or downsampled to 128×128 if training is slow; frozen first, then fine-tune last block)
+- [ ] Pretrained ResNet18 on the crops (384×384, may be downsampled to 128×128 for training; frozen first, then fine-tune last block)
 - [ ] Two crops per flight (origin + destination) through a **shared** CNN → two embeddings
 - [ ] **Image-encoder comparison** (image-only model, same crops, same split, same epochs, selected on **validation**):
 
@@ -973,7 +1006,7 @@ Keep these days free. Something will break.
 When working in this repository:
 
 - **Windows note:** Smart App Control blocks some compiled files and `.exe` launchers. Run tools through the venv interpreter: `.venv\Scripts\python.exe -m pytest`, `-m ruff`, `-m src.ingest.download_bts`. If a package fails with "DLL load failed … contrôle d'application", install a slightly older version (pandas is pinned `<3.1` for this reason).
-- **`config.yaml` keys used by the ingest scripts must not be renamed:** `data_dir`, `hubs`, `period.start/end`, `weather_buffer_days`, `radar.product`, `radar.crop_px`, `radar.frames_before_t_pred`, `radar.keep_national_days`, `t_pred_hours_before_departure`, `iem_sleep_seconds`. Other keys (splits, costs, chain threshold) can be added.
+- **`config.yaml` keys used by the ingest scripts must not be renamed:** `data_dir`, `hubs`, `period.start/end`, `weather_buffer_days`, `radar.product`, `radar.crop_px`, `radar.frames_before_t_pred`, `radar.keep_national_days`, `radar.expected_wld`, `radar.expected_shape`, `t_pred_hours_before_departure`, `iem_sleep_seconds`. Other keys (splits, costs, chain threshold) can be added.
 
 0. **Never run git commands** (no `git add`, `commit`, `push`, `branch`, `checkout`, `pre-commit install`). The author handles version control manually. When a step is done, just list the files that changed.
 
@@ -1043,4 +1076,5 @@ When working in this repository:
 | 2026-10 | Chain break threshold chosen from the ground-time distribution; overnight stops and maintenance handled as chain breaks | Delay propagation mostly happens within an operating day |
 | 2026-10 | PC Parquet = master copy; develop joins in DuckDB; run the real Bronze/Silver/Gold pipeline + MLflow on Databricks; export Gold back | Real Databricks work for the CV, no data split, quota-proof |
 | 2026-10 | Renamed airports handled by `airport_aliases` in `config.yaml` (first case: `DJT` → `PBI`; used by `build_station_list` and `radar_needed_hours`); Silver keys airports on BTS `OriginAirportID` / `DestAirportID`; IEM weather ids that differ from the code go in `weather_station_ids` (PBI: METAR `DJT`, TAF `KPBI` + `KDJT` as two raw files, merged in Silver) | One physical airport = one station and one category for the model; BTS codes can change mid-period (PBI → DJT, Aug 2026), and IEM handles the rename differently for METAR (history moved) and TAF (archive split) |
+| 2026-11 | Radar crop size **256 → 384 px** (≈ 213 km N–S, ≈ 178 km E–W at ATL); old 256 px crops deleted, never mixed (`download_radar` checks the size of existing `.npz` files) | A storm moving 40–50 km/h covers ~100 km in the 2 h between `T_pred` and departure; 256 px saw only ~±70 km. Same download time (same national images); storage ~34 GB of crops instead of ~15 GB |
 | 2026-10 | Repo private at start, public after cleanup (end of Phase 1–2) | Clean first impression; unlimited Actions minutes on public repos |
