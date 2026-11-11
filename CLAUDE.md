@@ -12,9 +12,9 @@
 ## 0. Current status and next steps
 
 > **Keep this section updated after every step** (Claude Code updates it at the end of each task).
-> Last update: 2026-11-07 (radar crop size 256 → 384 px).
+> Last update: 2026-11-11 (notebook 02 written; notebook 01 batch 2 still to be run by Ahmed).
 
-**Phase:** 1 (Understand and connect the data). Step 1.1 setup done; downloads partly done.
+**Phase:** 1 (Understand and connect the data). Step 1.1 setup done; downloads done; step 1.2 (notebook 01) and steps 1.3–1.4 (notebook 02) written, to be run and answered by Ahmed.
 
 **Done**
 - Repo scaffold, venv, `config.yaml`, ruff config (passes).
@@ -23,20 +23,36 @@
 - **METAR:** 314/314 airports with data (24 via a non-IATA id, see `_station_ids_used.csv`).
 - **TAF:** 306/314 airports (+ Palm Beach as two files `KPBI` + `KDJT`); 8 without TAF.
 - Radar scripts reviewed and fixed (grid + image-size checks, 255 padding, merged logs, sleeps, `--start/--end`, incremental resume that completes days missing crops, crop-size check on existing `.npz`).
-- Radar test day 2025-07-15 run once at **256 px** (240 hub crops, 0.9 MB). **Crop size then changed to 384 px** → that file must be deleted by Ahmed and the test day redone.
+- **Radar crops at 384 px downloaded:** 976 daily `.npz`, 2023-12-31 → 2026-09-01 (full run finished 2026-11-09, ~43 GB; `radar_needed_hours.parquet` built 2026-11-07). Known gaps are listed in `radar_crops\missing_files.txt` (PNGs that do not exist on the server) and `radar_crops\skipped_airports.txt` (airports outside the contiguous-US composite): to look at in notebook 02 and in the data-quality report.
 - `docs/learning_log.md` template created.
-- `notebooks/01_explore_bts.ipynb` **batch 1 written** (sections 0–6, July 2025): setup, counts, flight key, cancelled/diverted/tail, delay distribution, delay by hour/hub/airline, cause columns. Code tested outside Jupyter (runs; 631,428 rows ✅, key unique ✅, `DepDel15` check 0 mismatches ✅). **Not yet run by Ahmed; "My answer" cells empty.**
+- `notebooks/01_explore_bts.ipynb` **batch 1** (sections 0–6, July 2025): setup, counts, flight key, cancelled/diverted/tail, delay distribution, delay by hour/hub/airline, cause columns. **Run by Ahmed, "My answer" cells written.**
+- `notebooks/01_explore_bts.ipynb` **batch 2 written** (sections 7–11, appended, batch 1 cells untouched): local → UTC (`to_utc`, `to_utc_series`, zone names, `2400`, arrival = departure + `CRSElapsedTime`), one tail through a day, ground-time distribution, broken links per rule, consistency check, summary + check questions. Every cell run once outside Jupyter (no error; ruff passes). **Not yet run by Ahmed; "My answer" cells empty.** Numbers from that run (July 2025 only):
+  - 345 airports, 0 without a time zone; arrival cross-check 99.997 % (18 rows where `CRSElapsedTime` and `CRSArrTime` disagree).
+  - 5,671 tails, 629,734 legs, 624,063 links; 96.4 % at the same airport; 1.5 % of those have a negative scheduled ground time (overlap), 0.7 % are under 20 min.
+  - Ground time: turnaround peak at 30–90 min, overnight group at 6–12 h, emptiest 30-min bin at 4.0–4.5 h. Candidate thresholds printed: 3 h / 4 h / 5 h → 24.2 % / 23.2 % / 22.4 % of same-airport links broken.
+  - With the trial value 4 h: 70.5 % of links valid. Consistency: 97.0 % of legs with `LateAircraftDelay > 0` follow a late previous arrival on valid links (39.7 % on broken links).
+- **`chain_break_ground_time_hours` is still `null` in `config.yaml`: the value is to be chosen by Ahmed** (notebook 01, section 9).
+- `notebooks/02_explore_weather_radar.ipynb` **written** (steps 1.3–1.4; Part A = METAR/TAF, sections A0–A7; Part B = radar, B1–B6; 134 cells, 51 code). Every cell run once outside Jupyter (no error, no warning, ~45 s; ruff passes). Nothing written to disk, no download. **Not yet run by Ahmed; 14 "My answer" cells empty.** Numbers from that run:
+  - **METAR** (2025-07-15, ATL/JFK/MIA): 84 reports, 24 hourly each + 1 / 8 / 3 specials. The words `METAR`/`SPECI` are not in the IEM text: a special is recognised by its minute. `$` ends 66–78 % of the July reports of these three airports (flag it, never delete). `COR` in July: 23 / 14 / 70; the uncorrected first version is not in the file (0 rows sharing airport + time in July). ATL whole period: 2 pairs of rows with the same time (full report + short `AUTO … MADISHF` copy) → Silver keeps one row per airport and time.
+  - **`parse_metar_features`** (python-metar, strict mode, never raises): ATL July 832 reports, 0 failures; 10 hubs 8,321 reports, 2 failures (0.02 %, typos in the wind group of `COR` reports at JFK and LAS). `ts_in_weather` 7.3 % vs `ts_in_remarks` 26.0 % of ATL reports → **two thunderstorm flags** (at the airport now / hint in the remarks). Gust reported in 85 of 832 reports, a ceiling in 377: NaN there means "none", not missing.
+  - **Storm hours, July 2025** (UTC hours with a `TS` weather group): ATL 33, DEN 31, CLT 26, ORD 24, DFW 15, JFK 11, LAS 6, PHX 4, LAX 0, SEA 0. Chosen by code at ATL: **`STORM_DAY` = 2025-07-01, `CALM_DAY` = 2025-07-03**.
+  - **TAF KATL, July 2025:** 1,992 rows = 393 TAFs, 12.7 per day = 4 routine (issued ~05:30 / 11:30 / 17:30 / 23:40 UTC) + ~8.6 amendments (about 2 h and 4 h after each routine one). No `BECMG`, no `PROB40`. **`is_amendment` is empty for 198 of the 393 TAFs** (rows issued 2025-01 → 2025-08 in the whole file): recognise amendments from the `product_id` suffix (`-AAA`, `-AAB`…; `-CCA` = correction, `-RRA` = late). Rows of one TAF are not always in time order. In 37 of 393 first groups, IEM's parsed `presentwx` contains a `TS` that is not in the group's own `raw` text → `raw` is the reference in Silver.
+  - **T_pred demo** (made-up ATL departure 2025-07-01 19:00 UTC, `T_pred` 17:00): latest TAF issued 16:08 (amendment AAC) gives `PROB30 … -TSRA` for 18–22 UTC; last METAR ≤ `T_pred` (16:52) shows nothing; METAR at departure: `+TSRA`, 1 SM, gusts 27 kt.
+  - **Radar grid:** `.wld` and image shape match `config.yaml`; ATL is at national pixel (row 3273, col 8314). **Crops rebuilt by hand are identical to the stored ones: 240 / 240** (24 hours × 10 hubs, 2025-07-15). Crop = 213.5 km north–south; east–west 177.8 km at ATL, 144.4 km at SEA.
+  - **dBZ:** `value × 0.5 − 32.5` is consistent with the IEM page (ramp "NODATA, then −32 to 90 dBZ in 0.5 steps"; the page does not write the formula) and with the PNG palette (green from 20, yellow ~40, red from 50 dBZ). **So 255 would be 95.0 dBZ, not 95.5** as written in §4 and in the `download_radar` docstring (slip in the text only; `src/` not changed). Largest value in the 24 national images of 2025-07-15: 249 (1 pixel above 245 in 1.58 billion): isolated artefact pixels → cap dBZ (e.g. at 75) before training.
+  - **Storm vs. calm at ATL** (share of crop pixels ≥ 40 dBZ, mean over the day / highest hour): 2025-07-01 **1.31 % / 7.53 %**; 2025-07-03 **0.01 % / 0.08 %**.
+  - **Gaps:** 19 missing hourly images = **one block, 2026-04-01 20:00 → 2026-04-02 14:00 UTC, in the test split**. 16 airports outside the composite (Alaska 6, Hawaii 5, Puerto Rico 3, Virgin Islands 2). Needed vs. on disk: July 2025 120,096 needed, 95.57 % on disk, 5,319 absent (all "airport outside the image"); April 2026 113,683 needed, 6,896 absent (4,235 outside + 2,661 missing image). **0 unexplained.**
+  - **255 never appears in practice:** no covered airport is closer than 192 px to a border (closest: BLI, 241 px), and 0 pixels equal 255 in all 3,676 crops of 2025-07-15. The mask stays as a safety net.
 
 **Not started yet**
-- Notebook 01 batch 2 (UTC times, one tail through a day, ground-time distribution → `chain_break_ground_time_hours`, consistency check, summary).
-- Radar at 384 px (test day redo, `radar_needed_hours`, full run).
-- Notebooks 02–03, tests, Silver/Gold, data-quality report, models.
+- Notebook 03, tests, Silver/Gold, data-quality report, models.
 
 **Next steps (in order)**
-1. Delete the old 256 px test file `C:\data\flight-delay\raw\radar_crops\2025\07\20250715.npz`, then redo the radar test day at 384 px: `.venv\Scripts\python.exe -m src.ingest.download_radar --test-day 2025-07-15` (time it; inspect: ATL at pixel (192, 192), does 255 appear inside the real image, storms vs. METAR `TS`).
-2. `.venv\Scripts\python.exe -m src.ingest.radar_needed_hours` (full).
-3. Full radar run, overnight, resumable: `.venv\Scripts\python.exe -m src.ingest.download_radar` (or in slices with `--start/--end`). When a new BTS month is published: `download_bts` → `radar_needed_hours` → `download_radar` (completes the days that miss crops).
-4. Meanwhile: run notebook 01 batch 1 and write the "My answer" cells; then ask for batch 2 (incl. ground-time distribution → `chain_break_ground_time_hours`, value chosen by Ahmed).
+1. Ahmed: run notebook 01 batch 2 (sections 7–11) and write the "My answer" cells and the two check questions at the end.
+2. Ahmed: choose `chain_break_ground_time_hours` from section 9, write it in `config.yaml`, note the reason in `docs/learning_log.md` and in the decisions log (§23); then set `THRESHOLD_H` to it in section 10 and rerun sections 10–11.
+3. Ahmed: run notebook 02 (`02_explore_weather_radar.ipynb`) top to bottom, write the 14 "My answer" cells (including the three check questions of steps 1.3–1.4 at the end), and note in `docs/learning_log.md` what Silver must do (summaries A7 and B6).
+4. Notebook 03 (`03_pilot_join.ipynb`, step 1.5) + `tests/test_time.py`, `tests/test_joins.py`: one flight fully joined (previous leg, last METAR ≤ `T_pred`, latest TAF ≤ `T_pred`, radar crop). Reuse from notebook 02: `parse_metar_features`, `taf_groups_in_order`, `latlon_to_pixel`, `crop_to_dbz`.
+5. When a new BTS month is published: `download_bts` → `radar_needed_hours` → `download_radar` (completes the days that miss crops).
 
 ---
 
